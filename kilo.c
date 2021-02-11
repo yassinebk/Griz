@@ -1,4 +1,7 @@
 /************* Includes ************/
+#define _DEFAULT_SOURCE
+#define _BSD_SOURCE
+#define _GNU_SOURCE
 #include <stdlib.h>
 #include <sys/ioctl.h>
 #include <sys/types.h> 
@@ -38,7 +41,7 @@ struct editorConfig
 	int screenrows;
 	int screencols;
 	int numrows ;
-	erow row ;
+	erow * row ;
 	struct termios orig_termios;
 };
 
@@ -51,7 +54,7 @@ struct editorConfig E;
 void die(const char *s)
 {
 	write(STDOUT_FILENO, "\x1b[2J", 4);
-	write(STDOUT_FILENO, "x1b[H", 3);
+	write(STDOUT_FILENO, "\x1b[H", 3);
 	perror(s);
 	exit(1);
 }
@@ -190,7 +193,37 @@ int editorReadKey() // reading the input by the editor
 			return 0;
 		}
 	}
+	/**********row operations *********/
+	void editorAppendRow(char * s , size_t len )
+{
+	E.row = realloc(E.row , sizeof(erow)*(E.numrows +1)) ;
 
+		int at  = E.numrows ;
+		 E.row[at].size = len ; 
+		 E.row[at].chars = malloc (len+1) ;
+		 memcpy ( E.row[at].chars,s ,len);
+		 E.row[at].chars[len] = '\0' ;
+		 E.numrows ++ ; 
+		}
+
+/********file i/o **********/ 
+void editorOpen(char *filename)
+	{
+		 FILE *fp = fopen(filename,"r") ; 
+		if(!fp) die("fopen"); 
+		 char *line =  NULL;
+		 ssize_t linelen  ;
+		 size_t linecap = 0 ;  
+		 
+		 while(( linelen = getline(&line , &linecap , fp))!= -1 ){ 
+				while(linelen > 0 && (line[linelen -1] =='\n'|| line[linelen-1]=='\r'))
+				{
+				linelen -- ; } 
+		editorAppendRow(line , linelen) ;
+}
+	free(line); 
+	free(fp);
+	}
 	/*********append buffer ******/
 
 	struct abuf
@@ -231,28 +264,36 @@ int editorReadKey() // reading the input by the editor
 		int y;
 		for (y = 0; y < E.screenrows; y++)
 		{
-			if (y == E.screenrows / 3)
+			if(y>= E.numrows)
 			{
-				char welcome[80];
-				int welcomelen = snprintf(welcome, sizeof(welcome),
-										  "Kilo editor -- verson %s ", KILO_VERSION);
 
-				if (welcomelen > E.screencols)
-					welcomelen = E.screencols;
-				int padding = (E.screencols - welcomelen) / 2;
+				if (E.numrows==0 && y == E.screenrows / 3)
 				{
-					if (padding)
-						abAppend(ab, "~", 1);
-					padding--;
-				}
-				while (padding--)
-					abAppend(ab, " ", 1);
-				abAppend(ab, welcome, welcomelen);
-			}
+					char welcome[80];
+					int welcomelen = snprintf(welcome, sizeof(welcome),
+											"Kilo editor -- verson %s ", KILO_VERSION);
 
-			else
-			{
-				abAppend(ab, "~", 1);
+					if (welcomelen > E.screencols)
+						welcomelen = E.screencols;
+					int padding = (E.screencols - welcomelen) / 2;
+					{
+						if (padding)
+							abAppend(ab, "~", 1);
+						padding--;
+					}
+					while (padding--)
+						abAppend(ab, " ", 1);
+					abAppend(ab, welcome, welcomelen);
+			}
+				else
+				{
+					abAppend(ab, "~", 1);
+				}
+			}
+			else {
+				int len = E.row[y].size ;
+				if(len> E.screencols) len = E.screencols ;
+				abAppend(ab,E.row[y].chars , len) ;
 			}
 
 			abAppend(ab, "\x1b[K", 3);
@@ -289,20 +330,16 @@ int editorReadKey() // reading the input by the editor
 		switch (key)
 		{
 		case ARROW_LEFT:
-			if (E.cx != 0)
-				E.cx--;
+			if (E.cx != 0) E.cx--;
 			break;
 		case ARROW_RIGHT:
-			if (E.cx < E.screenrows)
-				E.cx++;
+			if (E.cx != E.screenrows-1) E.cx++;
 			break;
 		case ARROW_UP:
-			if (E.cy != 0)
-				E.cy--;
+			if (E.cy != 0) E.cy--;
 			break;
 		case ARROW_DOWN:
-			if (E.cy < E.screencols)
-				E.cy++;
+			if (E.cy != E.screencols-1) E.cy++;
 			break;
 		}
 	}
@@ -312,12 +349,12 @@ int editorReadKey() // reading the input by the editor
 		switch (c)
 		{
 		case CTRL_KEY('q'):
-			write(STDOUT_FILENO, "x1b[2J", 4);
-			write(STDOUT_FILENO, "x1b[H", 3);
+			write(STDOUT_FILENO, "\x1b[2J", 4);
+			write(STDOUT_FILENO, "\x1b[H", 3);
 			exit(0);
 			break;
 		case HOME_KEY : E.cx = 0 ; break ;  
-		case END_KEY  : E.cx = E.screencols ; break ;  
+		case END_KEY  : E.cx = E.screencols-1 ; break ;  
 		
 		
 		case ARROW_UP:
@@ -329,7 +366,7 @@ int editorReadKey() // reading the input by the editor
 		
 		case PAGE_UP : case PAGE_DOWN :
 		{
-			int times = E.screencols ; 
+			int times = E.screenrows ; 
 			while (times--)
 				{
 					editorMoveCursor (c== PAGE_UP ? ARROW_UP : ARROW_DOWN) ;  
@@ -346,18 +383,24 @@ int editorReadKey() // reading the input by the editor
 	{
 		E.cx = E.cy = 0; //setting the starting position of the cursor at the top left of the screen
 		E.numrows = 0 ; 
+		E.row = NULL ; 
 		if (GetWindowSize(&E.screenrows, &E.screencols) == -1)
 			die("getWindowSize");
 	}
 
-	int main()
+	int main(int argc ,char *argv[])
 	{
 		enableRawMode();
 		initEditor();
+		if(argc>=2)
+			{
+				editorOpen(argv[1]);
+			}
 		while (1)
 		{
 			editorRefreshScreen();
 			editorProcessKeypress();
+			
 		}
 
 		return 0;
